@@ -4,18 +4,23 @@
 __author__ = "Daulet N."
 __email__ = "daulet.nurmanbetov@gmail.com"
 
+import os
 import logging
 from langdetect import detect
 from simpletransformers.ner import NERModel
 
+RPUNCT_LANG = os.environ.get("RPUNCT_LANG")
+RPUNCT_USE_CUDA = os.environ.get("RPUNCT_USE_CUDA", "False")
+print(f"RPUNCT_USE_CUDA: {RPUNCT_USE_CUDA}")
+use_cuda_flag = RPUNCT_USE_CUDA.lower() == "true"
 
 class RestorePuncts:
     def __init__(self, wrds_per_pred=250):
         self.wrds_per_pred = wrds_per_pred
         self.overlap_wrds = 30
         self.valid_labels = ['OU', 'OO', '.O', '!O', ',O', '.U', '!U', ',U', ':O', ';O', ':U', "'O", '-O', '?O', '?U']
-        self.model = NERModel("bert", "felflare/bert-restore-punctuation", labels=self.valid_labels,
-                              args={"silent": True, "max_seq_length": 512})
+        self.model = NERModel("bert", "felflare/bert-restore-punctuation", labels=self.valid_labels, use_cuda=use_cuda_flag, 
+                              args={"silent": True, "max_seq_length": 512, "use_cuda": use_cuda_flag})
 
     def punctuate(self, text: str, lang:str=''):
         """
@@ -28,7 +33,8 @@ class RestorePuncts:
             - lang (str): Explicit language of input text.
         """
         if not lang and len(text) > 10:
-            lang = detect(text)
+            #lang = detect(text)
+            lang = RPUNCT_LANG
         if lang != 'en':
             raise Exception(F"""Non English text detected. Restore Punctuation works only for English.
             If you are certain the input is English, pass argument lang='en' to this function.
@@ -126,6 +132,8 @@ class RestorePuncts:
                     index += 1
                     pred_item_tuple = list(wrd.items())[0]
                     output_text.append(pred_item_tuple)
+        #print("output_text first elements:", [i[0] for i in output_text])
+        #print("split_full_text:", split_full_text)
         assert [i[0] for i in output_text] == split_full_text
         return output_text
 
