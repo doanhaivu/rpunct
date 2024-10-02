@@ -71,58 +71,49 @@ class RestorePuncts:
         return predictions, raw_outputs
 
     @staticmethod
-    #     def split_on_toks(text, length, overlap):
     def split_on_toks(text, max_length=512, overlap=30):
-        """
-        Splits text into predefined slices of overlapping text with indexes (offsets)
-        that tie-back to original text.
-        This is done to bypass 512 token limit on transformer models by sequentially
-        feeding chunks of < 512 toks.
-        Example output:
-        [{...}, {"text": "...", 'start_idx': 31354, 'end_idx': 32648}, {...}]
-        """
-        wrds = text.replace('\n', ' ').split(" ")
+        tokenizer = AutoTokenizer.from_pretrained("felflare/bert-restore-punctuation")
+        
+        # Tokenize the text with offsets
+        encoding = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
+        tokens = encoding.tokens()
+        offsets = encoding.offset_mapping
+        
+        total_tokens = len(tokens)
         resp = []
-        lst_chunk_idx = 0
-        i = 0
-        tokenizer = AutoTokenizer.from_pretrained("felflare/bert-restore-punctuation")  # Ensure tokenizer is initialized
+        start_token_idx = 0
 
-        while True:
-            # Select the words for the chunk and the overlapping portion
-            # wrds_len = wrds[(length * i):(length * (i + 1))]
-            # wrds_ovlp = wrds[(length * (i + 1)):((length * (i + 1)) + overlap)]
-            wrds_len = wrds[(max_length * i):(max_length * (i + 1))]
-            wrds_ovlp = wrds[(max_length * (i + 1)):((max_length * (i + 1)) + overlap)]
-            wrds_split = wrds_len + wrds_ovlp
+        while start_token_idx < total_tokens:
+            end_token_idx = min(start_token_idx + max_length, total_tokens)
 
-            # Break the loop if there are no more words
-            if not wrds_split:
-                break
+            # Extract tokens and offsets for the chunk
+            chunk_tokens = tokens[start_token_idx:end_token_idx]
+            chunk_offsets = offsets[start_token_idx:end_token_idx]
 
-            wrds_str = " ".join(wrds_split)
+            # Handle overlap
+            if end_token_idx < total_tokens:
+                overlap_end_idx = min(end_token_idx + overlap, total_tokens)
+            else:
+                overlap_end_idx = end_token_idx
 
-            # Ensure that the chunk doesn't exceed the token limit for the model
-            tokenized_len = len(tokenizer.tokenize(wrds_str))
-            if tokenized_len > max_length:
-                logging.warning(f"Chunk exceeds max token length. Reducing chunk size.")
-                # Reduce the chunk size until it fits within max_length
-                while tokenized_len > max_length and len(wrds_split) > 1:
-                    wrds_split.pop()  # Remove words from the end until the chunk is within the limit
-                    wrds_str = " ".join(wrds_split)
-                    tokenized_len = len(tokenizer.tokenize(wrds_str))
+            chunk_tokens_with_overlap = tokens[start_token_idx:overlap_end_idx]
+            chunk_offsets_with_overlap = offsets[start_token_idx:overlap_end_idx]
 
-            nxt_chunk_start_idx = len(" ".join(wrds_len))
-            lst_char_idx = len(" ".join(wrds_split))
+            # Reconstruct chunk text
+            chunk_text = tokenizer.convert_tokens_to_string(chunk_tokens_with_overlap)
+
+            # Get character indices
+            chunk_start_char = chunk_offsets[0][0]
+            chunk_end_char = chunk_offsets[end_token_idx - start_token_idx - 1][1]
 
             resp_obj = {
-                "text": wrds_str,
-                "start_idx": lst_chunk_idx,
-                "end_idx": lst_char_idx + lst_chunk_idx,
+                "text": chunk_text,
+                "start_idx": chunk_start_char,
+                "end_idx": chunk_end_char
             }
-
             resp.append(resp_obj)
-            lst_chunk_idx += nxt_chunk_start_idx + 1
-            i += 1
+
+            start_token_idx = end_token_idx  # Move to next chunk
 
         logging.info(f"Sliced transcript into {len(resp)} slices.")
         return resp
