@@ -8,9 +8,6 @@ import os
 import logging
 from langdetect import detect
 from simpletransformers.ner import NERModel
-from transformers import AutoTokenizer
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 RPUNCT_LANG = os.environ.get("RPUNCT_LANG")
 RPUNCT_USE_CUDA = os.environ.get("RPUNCT_USE_CUDA", "False")
@@ -22,10 +19,8 @@ class RestorePuncts:
         self.wrds_per_pred = wrds_per_pred
         self.overlap_wrds = 30
         self.valid_labels = ['OU', 'OO', '.O', '!O', ',O', '.U', '!U', ',U', ':O', ';O', ':U', "'O", '-O', '?O', '?U']
-        self.model_name = "felflare/bert-restore-punctuation"
-        self.model = NERModel("bert", self.model_name, labels=self.valid_labels, use_cuda=use_cuda_flag, 
+        self.model = NERModel("bert", "felflare/bert-restore-punctuation", labels=self.valid_labels, use_cuda=use_cuda_flag, 
                               args={"silent": True, "max_seq_length": 512, "use_cuda": use_cuda_flag})
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
     def punctuate(self, text: str, lang:str=''):
         """
@@ -38,27 +33,22 @@ class RestorePuncts:
             - lang (str): Explicit language of input text.
         """
         if not lang and len(text) > 10:
-            #lang = detect(text)
-            lang = RPUNCT_LANG
+            lang = detect(text)
+            #lang = RPUNCT_LANG
         if lang != 'en':
             raise Exception(F"""Non English text detected. Restore Punctuation works only for English.
             If you are certain the input is English, pass argument lang='en' to this function.
             Punctuate received: {text}""")
 
-        # Step 1: Split the cleaned text into chunks within the 512-token limit
-        # splits = self.split_on_toks(text, self.wrds_per_pred, self.overlap_wrds)
-        splits = self.split_on_toks(text, max_length=512, overlap=30)
-        
-        # Step 2: Predict punctuation for each chunk
-        # full_preds_lst = [self.predict(i['text']) for i in splits]
-        full_preds_lst = [self.predict(chunk['text']) for chunk in splits]
-
-        # Step 3: Extract predictions (discard logits)
+        # plit up large text into bert digestable chunks
+        splits = self.split_on_toks(text, self.wrds_per_pred, self.overlap_wrds)
+        # predict slices
+        # full_preds_lst contains tuple of labels and logits
+        full_preds_lst = [self.predict(i['text']) for i in splits]
+        # extract predictions, and discard logits
         preds_lst = [i[0][0] for i in full_preds_lst]
-
         # join text slices
-        combined_preds = self.combine_results(text, preds_lst, self.tokenizer)
-
+        combined_preds = self.combine_results(text, preds_lst)
         # create punctuated prediction
         punct_text = self.punctuate_texts(combined_preds)
         return punct_text
@@ -71,61 +61,54 @@ class RestorePuncts:
         return predictions, raw_outputs
 
     @staticmethod
-    def split_on_toks(text, max_length=512, overlap=30):
-        tokenizer = AutoTokenizer.from_pretrained("felflare/bert-restore-punctuation")
-        
-        # Tokenize the text with offsets
-        encoding = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
-        tokens = encoding.tokens()
-        offsets = encoding.offset_mapping
-        
-        total_tokens = len(tokens)
+    def split_on_toks(text, length, overlap):
+        """
+        Splits text into predefined slices of overlapping text with indexes (offsets)
+        that tie-back to original text.
+        This is done to bypass 512 token limit on transformer models by sequentially
+        feeding chunks of < 512 toks.
+        Example output:
+        [{...}, {"text": "...", 'start_idx': 31354, 'end_idx': 32648}, {...}]
+        """
+        wrds = text.replace('\n', ' ').split(" ")
         resp = []
-        start_token_idx = 0
+        lst_chunk_idx = 0
+        i = 0
 
-        while start_token_idx < total_tokens:
-            end_token_idx = min(start_token_idx + max_length, total_tokens)
+        while True:
+            # words in the chunk and the overlapping portion
+            wrds_len = wrds[(length * i):(length * (i + 1))]
+            wrds_ovlp = wrds[(length * (i + 1)):((length * (i + 1)) + overlap)]
+            wrds_split = wrds_len + wrds_ovlp
 
-            # Extract tokens and offsets for the chunk
-            chunk_tokens = tokens[start_token_idx:end_token_idx]
-            chunk_offsets = offsets[start_token_idx:end_token_idx]
+            # Break loop if no more words
+            if not wrds_split:
+                break
 
-            # Handle overlap
-            if end_token_idx < total_tokens:
-                overlap_end_idx = min(end_token_idx + overlap, total_tokens)
-            else:
-                overlap_end_idx = end_token_idx
-
-            chunk_tokens_with_overlap = tokens[start_token_idx:overlap_end_idx]
-            chunk_offsets_with_overlap = offsets[start_token_idx:overlap_end_idx]
-
-            # Reconstruct chunk text
-            chunk_text = tokenizer.convert_tokens_to_string(chunk_tokens_with_overlap)
-
-            # Get character indices
-            chunk_start_char = chunk_offsets[0][0]
-            chunk_end_char = chunk_offsets[end_token_idx - start_token_idx - 1][1]
+            wrds_str = " ".join(wrds_split)
+            nxt_chunk_start_idx = len(" ".join(wrds_len))
+            lst_char_idx = len(" ".join(wrds_split))
 
             resp_obj = {
-                "text": chunk_text,
-                "start_idx": chunk_start_char,
-                "end_idx": chunk_end_char
+                "text": wrds_str,
+                "start_idx": lst_chunk_idx,
+                "end_idx": lst_char_idx + lst_chunk_idx,
             }
+
             resp.append(resp_obj)
-
-            start_token_idx = end_token_idx  # Move to next chunk
-
+            lst_chunk_idx += nxt_chunk_start_idx + 1
+            i += 1
         logging.info(f"Sliced transcript into {len(resp)} slices.")
         return resp
 
     @staticmethod
-    def combine_results(full_text: str, text_slices, tokenizer):
+    def combine_results(full_text: str, text_slices):
         """
         Given a full text and predictions of each slice combines predictions into a single text again.
         Performs validataion wether text was combined correctly
         """
-        # Use the tokenizer to split full_text
-        split_full_text = tokenizer.tokenize(full_text)
+        split_full_text = full_text.replace('\n', ' ').split(" ")
+        split_full_text = [i for i in split_full_text if i]
         split_full_text_len = len(split_full_text)
         output_text = []
         index = 0
@@ -136,28 +119,21 @@ class RestorePuncts:
         for _slice in text_slices:
             slice_wrds = len(_slice)
             for ix, wrd in enumerate(_slice):
+                # print(index, "|", str(list(wrd.keys())[0]), "|", split_full_text[index])
                 if index == split_full_text_len:
                     break
 
-                token = list(wrd.keys())[0]
-
-                if split_full_text[index] == token and \
+                if split_full_text[index] == str(list(wrd.keys())[0]) and \
                         ix <= slice_wrds - 3 and text_slices[-1] != _slice:
                     index += 1
                     pred_item_tuple = list(wrd.items())[0]
                     output_text.append(pred_item_tuple)
-                elif split_full_text[index] == token and text_slices[-1] == _slice:
+                elif split_full_text[index] == str(list(wrd.keys())[0]) and text_slices[-1] == _slice:
                     index += 1
                     pred_item_tuple = list(wrd.items())[0]
                     output_text.append(pred_item_tuple)
-
-        # Debug statements to compare tokens
-        # print("Tokens from output_text:", [i[0] for i in output_text])
-        # print("Tokens from split_full_text:", split_full_text)
-
         assert [i[0] for i in output_text] == split_full_text
         return output_text
-
 
     @staticmethod
     def punctuate_texts(full_pred: list):
@@ -191,4 +167,3 @@ if __name__ == "__main__":
         test_sample = fp.read()
     # predict text and print
     punctuated = punct_model.punctuate(test_sample)
-    print(punctuated)
