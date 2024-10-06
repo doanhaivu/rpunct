@@ -9,7 +9,7 @@ import logging
 from langdetect import detect
 from simpletransformers.ner import NERModel
 
-RPUNCT_LANG = os.environ.get("RPUNCT_LANG")
+RPUNCT_LANG = os.environ.get("RPUNCT_LANG", "en")
 RPUNCT_USE_CUDA = os.environ.get("RPUNCT_USE_CUDA", "False")
 print(f"RPUNCT_USE_CUDA: {RPUNCT_USE_CUDA}")
 use_cuda_flag = RPUNCT_USE_CUDA.lower() == "true"
